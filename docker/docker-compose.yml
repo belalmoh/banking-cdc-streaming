@@ -1,0 +1,214 @@
+version: '3.8'
+
+services:
+  # Zookeeper (Kafka dependency)
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: cdc-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - cdc-network
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-logs:/var/lib/zookeeper/log
+
+  # Kafka broker
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: cdc-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9093,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168 # 7 days
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824 # 1GB
+    networks:
+      - cdc-network
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: [ "CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092" ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # Kafka UI (for monitoring)
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: cdc-kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: cdc-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9093
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - cdc-network
+
+  # MinIO (S3-compatible storage)
+  minio:
+    image: minio/minio:latest
+    container_name: cdc-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: admin123
+    command: server /data --console-address ":9001"
+    networks:
+      - cdc-network
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # MinIO client (create buckets)
+  minio-init:
+    image: minio/mc:latest
+    container_name: cdc-minio-init
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c " sleep 5; /usr/bin/mc alias set myminio http://minio:9000 admin admin123; /usr/bin/mc mb myminio/bronze --ignore-existing; /usr/bin/mc mb myminio/silver --ignore-existing; /usr/bin/mc mb myminio/gold --ignore-existing; /usr/bin/mc mb myminio/checkpoints --ignore-existing; exit 0; "
+    networks:
+      - cdc-network
+
+  # Spark Master
+  spark-master:
+    image: bitnami/spark:3.5.0
+    container_name: cdc-spark-master
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    ports:
+      - "8081:8080" # Web UI (different from Kafka UI)
+      - "7077:7077" # Spark master port
+    networks:
+      - cdc-network
+    volumes:
+      - ../spark-streaming-jobs:/opt/spark-jobs
+      - ../data:/opt/data
+      - spark-logs:/opt/spark/logs
+
+  # Spark Worker 1
+  spark-worker-1:
+    image: bitnami/spark:3.5.0
+    container_name: cdc-spark-worker-1
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    networks:
+      - cdc-network
+    volumes:
+      - ../spark-streaming-jobs:/opt/spark-jobs
+      - ../data:/opt/data
+
+  # Spark Worker 2
+  spark-worker-2:
+    image: bitnami/spark:3.5.0
+    container_name: cdc-spark-worker-2
+    depends_on:
+      - spark-master
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    networks:
+      - cdc-network
+    volumes:
+      - ../spark-streaming-jobs:/opt/spark-jobs
+      - ../data:/opt/data
+
+  # PostgreSQL (simulates source database)
+  postgres:
+    image: postgres:14
+    container_name: cdc-postgres
+    environment:
+      POSTGRES_DB: banking_core
+      POSTGRES_USER: banking_user
+      POSTGRES_PASSWORD: banking_pass
+      # Enable logical replication for CDC
+      POSTGRES_INITDB_ARGS: "-c wal_level=logical"
+    ports:
+      - "5432:5432"
+    networks:
+      - cdc-network
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=4"
+      - "-c"
+      - "max_wal_senders=4"
+
+  # Python environment (for running scripts)
+  python-env:
+    build:
+      context: .
+      dockerfile: python/Dockerfile
+    container_name: cdc-python-env
+    depends_on:
+      - kafka
+      - postgres
+    networks:
+      - cdc-network
+    volumes:
+      - ../scripts:/app/scripts
+      - ../data:/app/data
+      - ../monitoring:/app/monitoring
+    stdin_open: true
+    tty: true
+    command: tail -f /dev/null # Keep container running
+
+networks:
+  cdc-network:
+    driver: bridge
+
+volumes:
+  zookeeper-data:
+  zookeeper-logs:
+  kafka-data:
+  minio-data:
+  postgres-data:
+  spark-logs:

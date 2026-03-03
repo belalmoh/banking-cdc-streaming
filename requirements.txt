@@ -1,0 +1,20 @@
+# Kafka
+kafka-python==2.0.2
+
+# Data generation
+Faker==20.1.0
+
+# Spark (for local testing)
+pyspark==3.5.0
+delta-spark==3.0.0
+
+# Monitoring
+streamlit==1.29.0
+plotly==5.18.0
+pandas==2.1.4
+
+# Database
+psycopg2-binary==2.9.9
+
+# Utilities
+python-dotenv==1.0.0
