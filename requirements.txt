@@ -1,14 +1,14 @@
-# Kafka
-kafka-python==2.0.2
+# Kafka (Modern fork for Python 3.11/3.12 compatibility)
+kafka-python-ng==2.2.3
 
 # Data generation
 Faker==20.1.0
 
-# Spark (for local testing)
+# Spark (for local testing/development)
 pyspark==3.5.0
 delta-spark==3.0.0
 
-# Monitoring
+# Monitoring and visualization
 streamlit==1.29.0
 plotly==5.18.0
 pandas==2.1.4
@@ -16,5 +16,14 @@ pandas==2.1.4
 # Database
 psycopg2-binary==2.9.9
 
+# AWS/S3
+boto3==1.34.0
+
 # Utilities
 python-dotenv==1.0.0
+click==8.1.7
+pyyaml==6.0.1
+
+# Testing
+pytest==7.4.3
+pytest-cov==4.1.0

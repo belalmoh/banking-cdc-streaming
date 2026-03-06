@@ -5,6 +5,7 @@ services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     container_name: cdc-zookeeper
+    hostname: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -15,13 +16,20 @@ services:
     volumes:
       - zookeeper-data:/var/lib/zookeeper/data
       - zookeeper-logs:/var/lib/zookeeper/log
+    healthcheck:
+      test: [ "CMD", "nc", "-z", "localhost", "2181" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # Kafka broker
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     container_name: cdc-kafka
+    hostname: kafka
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     ports:
       - "9092:9092"
       - "9093:9093"
@@ -35,30 +43,33 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
-      KAFKA_LOG_RETENTION_HOURS: 168 # 7 days
-      KAFKA_LOG_SEGMENT_BYTES: 1073741824 # 1GB
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_SEGMENT_BYTES: 1073741824
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
     networks:
       - cdc-network
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
-      test: [ "CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092" ]
+      test: [ "CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 || exit 1" ]
       interval: 10s
       timeout: 10s
-      retries: 5
+      retries: 10
 
   # Kafka UI (for monitoring)
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: cdc-kafka-ui
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     ports:
       - "8080:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: cdc-cluster
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9093
       KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+      DYNAMIC_CONFIG_ENABLED: "true"
     networks:
       - cdc-network
 
@@ -66,6 +77,7 @@ services:
   minio:
     image: minio/minio:latest
     container_name: cdc-minio
+    hostname: minio
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -88,38 +100,52 @@ services:
     image: minio/mc:latest
     container_name: cdc-minio-init
     depends_on:
-      - minio
+      minio:
+        condition: service_healthy
     entrypoint: >
-      /bin/sh -c " sleep 5; /usr/bin/mc alias set myminio http://minio:9000 admin admin123; /usr/bin/mc mb myminio/bronze --ignore-existing; /usr/bin/mc mb myminio/silver --ignore-existing; /usr/bin/mc mb myminio/gold --ignore-existing; /usr/bin/mc mb myminio/checkpoints --ignore-existing; exit 0; "
+      /bin/sh -c " echo 'Waiting for MinIO to be ready...'; sleep 10; /usr/bin/mc alias set myminio http://minio:9000 admin admin123; /usr/bin/mc mb myminio/bronze --ignore-existing; /usr/bin/mc mb myminio/silver --ignore-existing; /usr/bin/mc mb myminio/gold --ignore-existing; /usr/bin/mc mb myminio/checkpoints --ignore-existing; echo 'Buckets created successfully'; exit 0; "
     networks:
       - cdc-network
 
   # Spark Master
   spark-master:
-    image: bitnami/spark:3.5.0
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
     container_name: cdc-spark-master
+    hostname: spark-master
     environment:
       - SPARK_MODE=master
       - SPARK_RPC_AUTHENTICATION_ENABLED=no
       - SPARK_RPC_ENCRYPTION_ENABLED=no
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
       - SPARK_SSL_ENABLED=no
+      - SPARK_USER=spark
     ports:
-      - "8081:8080" # Web UI (different from Kafka UI)
-      - "7077:7077" # Spark master port
+      - "8081:8080"
+      - "7077:7077"
+      - "4040:4040"
     networks:
       - cdc-network
     volumes:
       - ../spark-streaming-jobs:/opt/spark-jobs
       - ../data:/opt/data
       - spark-logs:/opt/spark/logs
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # Spark Worker 1
   spark-worker-1:
-    image: bitnami/spark:3.5.0
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
     container_name: cdc-spark-worker-1
     depends_on:
-      - spark-master
+      spark-master:
+        condition: service_healthy
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark-master:7077
@@ -129,6 +155,7 @@ services:
       - SPARK_RPC_ENCRYPTION_ENABLED=no
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
       - SPARK_SSL_ENABLED=no
+      - SPARK_USER=spark
     networks:
       - cdc-network
     volumes:
@@ -137,10 +164,13 @@ services:
 
   # Spark Worker 2
   spark-worker-2:
-    image: bitnami/spark:3.5.0
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
     container_name: cdc-spark-worker-2
     depends_on:
-      - spark-master
+      spark-master:
+        condition: service_healthy
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark-master:7077
@@ -150,6 +180,7 @@ services:
       - SPARK_RPC_ENCRYPTION_ENABLED=no
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
       - SPARK_SSL_ENABLED=no
+      - SPARK_USER=spark
     networks:
       - cdc-network
     volumes:
@@ -160,14 +191,13 @@ services:
   postgres:
     image: postgres:14
     container_name: cdc-postgres
+    hostname: postgres
     environment:
       POSTGRES_DB: banking_core
       POSTGRES_USER: banking_user
       POSTGRES_PASSWORD: banking_pass
-      # Enable logical replication for CDC
-      POSTGRES_INITDB_ARGS: "-c wal_level=logical"
     ports:
-      - "5432:5432"
+      - "5433:5432" # Note: Using 5433 externally to avoid conflicts
     networks:
       - cdc-network
     volumes:
@@ -181,34 +211,27 @@ services:
       - "max_replication_slots=4"
       - "-c"
       - "max_wal_senders=4"
-
-  # Python environment (for running scripts)
-  python-env:
-    build:
-      context: .
-      dockerfile: python/Dockerfile
-    container_name: cdc-python-env
-    depends_on:
-      - kafka
-      - postgres
-    networks:
-      - cdc-network
-    volumes:
-      - ../scripts:/app/scripts
-      - ../data:/app/data
-      - ../monitoring:/app/monitoring
-    stdin_open: true
-    tty: true
-    command: tail -f /dev/null # Keep container running
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U banking_user -d banking_core" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 networks:
   cdc-network:
     driver: bridge
+    name: cdc-network
 
 volumes:
   zookeeper-data:
+    name: cdc-zookeeper-data
   zookeeper-logs:
+    name: cdc-zookeeper-logs
   kafka-data:
+    name: cdc-kafka-data
   minio-data:
+    name: cdc-minio-data
   postgres-data:
+    name: cdc-postgres-data
   spark-logs:
+    name: cdc-spark-logs
