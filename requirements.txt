@@ -1,29 +1,26 @@
-# Kafka (Modern fork for Python 3.11/3.12 compatibility)
-kafka-python-ng==2.2.3
-
-# Data generation
-Faker==20.1.0
-
-# Spark (for local testing/development)
-pyspark==3.5.0
-delta-spark==3.0.0
-
-# Monitoring and visualization
-streamlit==1.29.0
-plotly==5.18.0
-pandas==2.1.4
+# Kafka & Streaming
+kafka-python==2.0.2
+confluent-kafka==2.3.0
 
 # Database
 psycopg2-binary==2.9.9
 
-# AWS/S3
-boto3==1.34.0
+# Data generation
+Faker==20.1.0
+
+# Spark (for local testing)
+pyspark==3.5.0
+delta-spark==3.0.0
+
+# Orchestration
+click==8.1.7
+docker==7.0.0
+requests==2.31.0
+pyyaml==6.0.1
 
 # Utilities
 python-dotenv==1.0.0
-click==8.1.7
-pyyaml==6.0.1
+rich==13.7.0  # Pretty console output
 
 # Testing
 pytest==7.4.3
-pytest-cov==4.1.0
