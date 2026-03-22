@@ -6,7 +6,7 @@ Simplified version using shared config
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    col, when, lit, current_timestamp, to_timestamp,
+    col, when, lit, current_timestamp,
     trim, upper, round as spark_round
 )
 from pyspark.sql.types import DecimalType
@@ -82,7 +82,7 @@ class SilverTransactionsMerge:
             upper(trim(col("currency"))).alias("currency"),
             trim(col("merchant_name")).alias("merchant_name"),
             upper(trim(col("merchant_category"))).alias("merchant_category"),
-            to_timestamp(col("transaction_timestamp")).alias("transaction_timestamp"),
+            col("transaction_timestamp").alias("transaction_timestamp"),
             upper(trim(col("country"))).alias("country"),
             col("is_international").alias("is_international"),
             upper(trim(col("status"))).alias("status"),

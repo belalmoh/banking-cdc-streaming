@@ -5,7 +5,7 @@ Silver Layer - Customers (SCD Type 2)
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    col, when, lit, current_timestamp, to_date, trim, upper
+    col, when, lit, current_timestamp, trim, upper
 )
 from delta import configure_spark_with_delta_pip
 from delta.tables import DeltaTable
@@ -64,7 +64,9 @@ class SilverCustomersSCD2:
                 StructField("is_current", BooleanType(), True),
                 StructField("_created_at", TimestampType(), True),
                 StructField("_updated_at", TimestampType(), True),
-                StructField("_silver_processed_at", TimestampType(), True)
+                StructField("_silver_processed_at", TimestampType(), True),
+                StructField("cdc_operation", StringType(), True),
+                StructField("_ingestion_timestamp", TimestampType(), True)
             ])
             
             empty_df = self.spark.createDataFrame([], schema)
@@ -80,11 +82,11 @@ class SilverCustomersSCD2:
             trim(col("last_name")).alias("last_name"),
             trim(col("email")).alias("email"),
             trim(col("phone")).alias("phone"),
-            to_date(col("date_of_birth")).alias("date_of_birth"),
+            col("date_of_birth").alias("date_of_birth"),
             upper(trim(col("nationality"))).alias("nationality"),
             col("risk_score").cast("int").alias("risk_score"),
             upper(trim(col("kyc_status"))).alias("kyc_status"),
-            col("onboarding_date").cast("timestamp").alias("onboarding_date"),
+            col("onboarding_date").alias("onboarding_date"),
             upper(trim(col("customer_segment"))).alias("customer_segment"),
             upper(trim(col("country_residence"))).alias("country_residence"),
             col("cdc_operation"),

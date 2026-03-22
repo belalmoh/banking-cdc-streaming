@@ -10,7 +10,7 @@ Usage:
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    col, from_json, current_timestamp, lit, to_date, concat_ws, sha2
+    col, expr, from_json, current_timestamp, lit, to_date
 )
 from delta import configure_spark_with_delta_pip
 from delta.tables import DeltaTable
@@ -35,6 +35,7 @@ class BronzeCDCConsumer:
         
         # Initialize Spark with Delta Lake
         builder = SparkSession.builder \
+            .master(self.config.SPARK_MASTER) \
             .appName("Bronze-CDC-Consumer-Debezium") \
             .config("spark.cores.max", "2") \
             .config("spark.executor.cores", "1")
@@ -49,9 +50,32 @@ class BronzeCDCConsumer:
         logger.info("✅ Spark session initialized for Bronze CDC Consumer")
         logger.info(f"📡 Kafka: {self.config.KAFKA_BOOTSTRAP_SERVERS}")
         logger.info(f"💾 Bronze path: {self.config.BRONZE_PATH}")
+
+    def normalize_temporal_columns(self, df, entity: str):
+        """Convert Debezium logical temporal values into Spark-native types."""
+        if entity == 'transactions':
+            return df \
+                .withColumn("transaction_timestamp", expr("timestamp_micros(transaction_timestamp)")) \
+                .withColumn("created_at", expr("timestamp_micros(created_at)"))
+
+        if entity == 'customers':
+            return df \
+                .withColumn("date_of_birth", expr("date_from_unix_date(date_of_birth)")) \
+                .withColumn("onboarding_date", expr("timestamp_micros(onboarding_date)")) \
+                .withColumn("created_at", expr("timestamp_micros(created_at)")) \
+                .withColumn("updated_at", expr("timestamp_micros(updated_at)"))
+
+        if entity == 'accounts':
+            return df \
+                .withColumn("opened_date", expr("timestamp_micros(opened_date)")) \
+                .withColumn("last_activity_date", expr("timestamp_micros(last_activity_date)")) \
+                .withColumn("created_at", expr("timestamp_micros(created_at)")) \
+                .withColumn("updated_at", expr("timestamp_micros(updated_at)"))
+
+        return df
     
     def initialize_bronze_table(self, entity: str):
-        """Create Bronze table if it doesn't exist"""
+        """Create Bronze table if it doesn't exist with entity-specific schema"""
         bronze_path = f"{self.config.BRONZE_PATH}/{entity}_cdc"
         
         try:
@@ -60,13 +84,15 @@ class BronzeCDCConsumer:
         except Exception:
             logger.info(f"📝 Creating Bronze table: {bronze_path}")
             
-            # Get schema based on entity
+            # Get entity-specific schema
             if entity == 'transactions':
                 schema = DeltaSchemas.get_bronze_transactions()
+            elif entity == 'customers':
+                schema = DeltaSchemas.get_bronze_customers()
+            elif entity == 'accounts':
+                schema = DeltaSchemas.get_bronze_accounts()
             else:
-                # For now, use transactions schema as template
-                # You can create specific schemas for customers/accounts
-                schema = DeltaSchemas.get_bronze_transactions()
+                raise ValueError(f"Unknown entity: {entity}")
             
             empty_df = self.spark.createDataFrame([], schema)
             empty_df.write.format("delta").partitionBy("_ingestion_date").save(bronze_path)
@@ -127,6 +153,8 @@ class BronzeCDCConsumer:
             col("kafka_partition"),
             col("kafka_timestamp"),
         )
+
+        final_df = self.normalize_temporal_columns(final_df, entity)
 
         # Rename Debezium __ prefix fields and add audit columns
         final_df = final_df \
