@@ -1,61 +1,46 @@
 #!/usr/bin/env python3
 """
 Silver Layer - Transactions (Streaming MERGE)
-
-Reads CDC events from Bronze and maintains current state in Silver.
-Handles INSERT/UPDATE/DELETE operations.
+Simplified version using shared config
 """
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    col, when, lit, current_timestamp, to_timestamp,
-    coalesce, trim, upper, round as spark_round
+    col, when, lit, current_timestamp,
+    trim, upper, round as spark_round
 )
 from pyspark.sql.types import DecimalType
 from delta import configure_spark_with_delta_pip
 from delta.tables import DeltaTable
 import logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+from config import Config
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
 class SilverTransactionsMerge:
     """Streaming MERGE for transactions Silver layer"""
     
-    def __init__(self,
-                 bronze_path: str = "s3a://bronze/transactions_cdc",
-                 silver_path: str = "s3a://silver/transactions",
-                 checkpoint_location: str = "s3a://checkpoints/silver-transactions",
-                 minio_endpoint: str = "http://minio:9000"):
+    def __init__(self):
+        self.config = Config()
         
-        self.bronze_path = bronze_path
-        self.silver_path = silver_path
-        self.checkpoint_location = checkpoint_location
-        
-        # Initialize Spark
-        builder = SparkSession.builder \
-            .appName("Silver-Transactions-Merge") \
-            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
-            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
-            .config("spark.hadoop.fs.s3a.endpoint", minio_endpoint) \
-            .config("spark.hadoop.fs.s3a.access.key", "admin") \
-            .config("spark.hadoop.fs.s3a.secret.key", "admin123") \
-            .config("spark.hadoop.fs.s3a.path.style.access", "true") \
-            .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
-            .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false") \
-            .config("spark.sql.streaming.checkpointLocation", checkpoint_location)
+        builder = SparkSession.builder.appName("Silver-Transactions-MERGE")
+        for key, value in self.config.get_spark_configs().items():
+            builder = builder.config(key, value)
         
         self.spark = configure_spark_with_delta_pip(builder).getOrCreate()
         self.spark.sparkContext.setLogLevel("WARN")
         
+        self.bronze_path = f"{self.config.BRONZE_PATH}/transactions_cdc"
+        self.silver_path = f"{self.config.SILVER_PATH}/transactions"
+        self.checkpoint_path = f"{self.config.CHECKPOINT_PATH}/silver-transactions"
+        
         logger.info("✅ Spark session initialized for Silver Transactions")
     
     def initialize_silver_table(self):
-        """Create Silver table if it doesn't exist"""
+        """Create Silver table if doesn't exist"""
         try:
             DeltaTable.forPath(self.spark, self.silver_path)
             logger.info(f"✅ Silver table exists: {self.silver_path}")
@@ -87,20 +72,20 @@ class SilverTransactionsMerge:
             logger.info("✅ Silver table created")
     
     def transform_bronze_to_silver(self, bronze_df):
-        """Transform Bronze CDC events to Silver format"""
+        """Transform Bronze to Silver format"""
         
         silver_df = bronze_df.select(
-            col("after_state.transaction_id").alias("transaction_id"),
-            col("after_state.account_id").alias("account_id"),
-            upper(trim(col("after_state.transaction_type"))).alias("transaction_type"),
-            spark_round(col("after_state.amount").cast(DecimalType(18, 2)), 2).alias("amount"),
-            upper(trim(col("after_state.currency"))).alias("currency"),
-            trim(col("after_state.merchant_name")).alias("merchant_name"),
-            upper(trim(col("after_state.merchant_category"))).alias("merchant_category"),
-            to_timestamp(col("after_state.transaction_timestamp")).alias("transaction_timestamp"),
-            upper(trim(col("after_state.country"))).alias("country"),
-            col("after_state.is_international").alias("is_international"),
-            upper(trim(col("after_state.status"))).alias("status"),
+            col("transaction_id").alias("transaction_id"),
+            col("account_id").alias("account_id"),
+            upper(trim(col("transaction_type"))).alias("transaction_type"),
+            spark_round(col("amount").cast(DecimalType(18, 2)), 2).alias("amount"),
+            upper(trim(col("currency"))).alias("currency"),
+            trim(col("merchant_name")).alias("merchant_name"),
+            upper(trim(col("merchant_category"))).alias("merchant_category"),
+            col("transaction_timestamp").alias("transaction_timestamp"),
+            upper(trim(col("country"))).alias("country"),
+            col("is_international").alias("is_international"),
+            upper(trim(col("status"))).alias("status"),
             col("cdc_operation"),
             col("_ingestion_timestamp")
         )
@@ -108,9 +93,7 @@ class SilverTransactionsMerge:
         silver_df = silver_df \
             .withColumn("_created_at", current_timestamp()) \
             .withColumn("_updated_at", current_timestamp()) \
-            .withColumn("_is_deleted", 
-                when(col("cdc_operation") == "d", lit(True)).otherwise(lit(False))
-            ) \
+            .withColumn("_is_deleted", when(col("cdc_operation") == "d", lit(True)).otherwise(lit(False))) \
             .withColumn("_silver_processed_at", current_timestamp())
         
         # Data quality filters
@@ -124,10 +107,10 @@ class SilverTransactionsMerge:
         return silver_df
     
     def merge_to_silver(self, batch_df, batch_id):
-        """Merge batch into Silver table using Delta MERGE"""
+        """Merge batch into Silver using Delta MERGE"""
         
         if batch_df.count() == 0:
-            logger.info(f"Batch {batch_id}: Empty batch, skipping")
+            logger.info(f"Batch {batch_id}: Empty, skipping")
             return
         
         logger.info(f"Batch {batch_id}: Processing {batch_df.count()} records")
@@ -140,7 +123,6 @@ class SilverTransactionsMerge:
         
         silver_table = DeltaTable.forPath(self.spark, self.silver_path)
         
-        # MERGE logic
         silver_table.alias("target").merge(
             silver_batch.alias("source"),
             "target.transaction_id = source.transaction_id"
@@ -182,54 +164,37 @@ class SilverTransactionsMerge:
             }
         ).execute()
         
-        logger.info(f"Batch {batch_id}: ✅ MERGE completed successfully")
+        logger.info(f"Batch {batch_id}: ✅ MERGE completed")
     
     def start_streaming(self):
-        """Start streaming MERGE from Bronze to Silver"""
+        """Start streaming MERGE"""
         logger.info("=" * 70)
         logger.info("🚀 Starting Silver Transactions Streaming MERGE")
-        logger.info("=" * 70)
-        logger.info(f"📖 Bronze source: {self.bronze_path}")
-        logger.info(f"💾 Silver target: {self.silver_path}")
-        logger.info(f"🔖 Checkpoint: {self.checkpoint_location}")
         logger.info("=" * 70)
         
         self.initialize_silver_table()
         
-        bronze_stream = self.spark.readStream \
-            .format("delta") \
-            .load(self.bronze_path)
-        
-        logger.info("✅ Reading from Bronze Delta table")
+        bronze_stream = self.spark.readStream.format("delta").load(self.bronze_path)
         
         query = bronze_stream.writeStream \
             .foreachBatch(self.merge_to_silver) \
             .outputMode("update") \
-            .option("checkpointLocation", self.checkpoint_location) \
+            .option("checkpointLocation", self.checkpoint_path) \
             .trigger(processingTime="15 seconds") \
             .start()
         
-        logger.info("✅ Streaming MERGE query started")
-        logger.info("\n🔍 Monitor at: http://localhost:4040")
+        logger.info("✅ Streaming MERGE started")
         logger.info("⏹️  Press Ctrl+C to stop\n")
         
         try:
             query.awaitTermination()
         except KeyboardInterrupt:
-            logger.info("\n🛑 Stopping streaming query...")
+            logger.info("\n🛑 Stopping...")
             query.stop()
-            logger.info("✅ Query stopped gracefully")
 
 
 def main():
-    """Main entry point"""
-    processor = SilverTransactionsMerge(
-        bronze_path="s3a://bronze/transactions_cdc",
-        silver_path="s3a://silver/transactions",
-        checkpoint_location="s3a://checkpoints/silver-transactions",
-        minio_endpoint="http://minio:9000"
-    )
-    
+    processor = SilverTransactionsMerge()
     processor.start_streaming()
 
 

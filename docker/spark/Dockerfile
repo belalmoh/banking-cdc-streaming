@@ -21,6 +21,6 @@ RUN pip install --no-cache-dir \
     loguru==0.7.0
 
 # Copy Spark configuration
-COPY spark-defaults.conf /opt/bitnami/spark/conf/spark-defaults.conf
+# COPY spark-defaults.conf /opt/bitnami/spark/conf/spark-defaults.conf
 
 USER 1001

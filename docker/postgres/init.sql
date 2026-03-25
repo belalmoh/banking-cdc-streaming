@@ -1,10 +1,10 @@
--- Banking CDC Streaming Project
--- PostgreSQL Source Database Initialization
+-- Banking CDC Streaming - PostgreSQL Source Database
+-- Configured for Debezium CDC with logical replication
 
 -- Enable extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- Create customers table
+-- Create tables
 CREATE TABLE IF NOT EXISTS customers (
     customer_id VARCHAR(50) PRIMARY KEY,
     first_name VARCHAR(100) NOT NULL,
@@ -22,7 +22,6 @@ CREATE TABLE IF NOT EXISTS customers (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Create accounts table
 CREATE TABLE IF NOT EXISTS accounts (
     account_id VARCHAR(50) PRIMARY KEY,
     customer_id VARCHAR(50) NOT NULL REFERENCES customers(customer_id) ON DELETE CASCADE,
@@ -36,7 +35,6 @@ CREATE TABLE IF NOT EXISTS accounts (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Create transactions table
 CREATE TABLE IF NOT EXISTS transactions (
     transaction_id VARCHAR(50) PRIMARY KEY,
     account_id VARCHAR(50) NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
@@ -52,26 +50,21 @@ CREATE TABLE IF NOT EXISTS transactions (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Create indexes for performance
-CREATE INDEX IF NOT EXISTS idx_customers_email ON customers(email);
-CREATE INDEX IF NOT EXISTS idx_customers_risk_score ON customers(risk_score);
-CREATE INDEX IF NOT EXISTS idx_customers_segment ON customers(customer_segment);
+-- Create indexes
+CREATE INDEX idx_customers_email ON customers(email);
+CREATE INDEX idx_customers_risk_score ON customers(risk_score);
+CREATE INDEX idx_accounts_customer ON accounts(customer_id);
+CREATE INDEX idx_accounts_status ON accounts(status);
+CREATE INDEX idx_transactions_account ON transactions(account_id);
+CREATE INDEX idx_transactions_timestamp ON transactions(transaction_timestamp);
+CREATE INDEX idx_transactions_amount ON transactions(amount);
 
-CREATE INDEX IF NOT EXISTS idx_accounts_customer ON accounts(customer_id);
-CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status);
-CREATE INDEX IF NOT EXISTS idx_accounts_type ON accounts(account_type);
-
-CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account_id);
-CREATE INDEX IF NOT EXISTS idx_transactions_timestamp ON transactions(transaction_timestamp);
-CREATE INDEX IF NOT EXISTS idx_transactions_amount ON transactions(amount);
-CREATE INDEX IF NOT EXISTS idx_transactions_status ON transactions(status);
-
--- Enable logical replication (for future Debezium integration)
+-- Enable logical replication (CRITICAL for Debezium)
 ALTER TABLE customers REPLICA IDENTITY FULL;
 ALTER TABLE accounts REPLICA IDENTITY FULL;
 ALTER TABLE transactions REPLICA IDENTITY FULL;
 
--- Create updated_at trigger function
+-- Create updated_at trigger
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -80,7 +73,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Apply updated_at triggers
 CREATE TRIGGER update_customers_updated_at
     BEFORE UPDATE ON customers
     FOR EACH ROW
@@ -95,8 +87,13 @@ CREATE TRIGGER update_accounts_updated_at
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO banking_user;
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO banking_user;
 
+-- Create publication for Debezium (CRITICAL)
+CREATE PUBLICATION dbz_publication FOR TABLE customers, accounts, transactions;
+
 -- Success message
 DO $$
 BEGIN
-    RAISE NOTICE 'Banking CDC database initialized successfully!';
+    RAISE NOTICE '✅ Banking CDC database initialized!';
+    RAISE NOTICE '✅ Logical replication enabled';
+    RAISE NOTICE '✅ Publication created: dbz_publication';
 END $$;

@@ -1,6 +1,8 @@
 version: '3.8'
 
 services:
+  # ==================== Core Infrastructure ====================
+
   # Zookeeper (Kafka dependency)
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
@@ -56,7 +58,7 @@ services:
       timeout: 10s
       retries: 10
 
-  # Kafka UI (for monitoring)
+  # Kafka UI
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: cdc-kafka-ui
@@ -72,6 +74,123 @@ services:
       DYNAMIC_CONFIG_ENABLED: "true"
     networks:
       - cdc-network
+
+  # ==================== Debezium Stack ====================
+
+  # Schema Registry (for Avro schemas)
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.5.0
+    container_name: cdc-schema-registry
+    hostname: schema-registry
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:9093
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 1
+      SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL: backward
+    networks:
+      - cdc-network
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8081/" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Kafka Connect with Debezium
+  kafka-connect:
+    image: debezium/connect:2.5
+    container_name: cdc-kafka-connect
+    hostname: kafka-connect
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9093
+      GROUP_ID: debezium-connect-cluster
+      CONFIG_STORAGE_TOPIC: debezium-connect-configs
+      OFFSET_STORAGE_TOPIC: debezium-connect-offsets
+      STATUS_STORAGE_TOPIC: debezium-connect-status
+
+      # Replication factors
+      CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      STATUS_STORAGE_REPLICATION_FACTOR: 1
+
+      # Converters - Using JSON for simplicity (can use Avro if needed)
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+
+      # Connect properties
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      CONNECT_PLUGIN_PATH: /kafka/connect
+
+      # Logging
+      CONNECT_LOG4J_ROOT_LOGLEVEL: INFO
+      CONNECT_LOG4J_LOGGERS: org.apache.kafka.connect.runtime.rest=WARN,org.reflections=ERROR
+
+      # Internal converters
+      INTERNAL_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      INTERNAL_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      INTERNAL_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      INTERNAL_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+    networks:
+      - cdc-network
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8083/" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - ../config:/kafka/config
+
+  # ==================== Data Storage ====================
+
+  # PostgreSQL (Source Database)
+  postgres:
+    image: postgres:14
+    container_name: cdc-postgres
+    hostname: postgres
+    environment:
+      POSTGRES_DB: banking_core
+      POSTGRES_USER: banking_user
+      POSTGRES_PASSWORD: banking_pass
+    ports:
+      - "5433:5432"
+    networks:
+      - cdc-network
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    command:
+      - "postgres"
+      # Debezium CDC requirements
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=10"
+      - "-c"
+      - "max_wal_senders=10"
+      # Performance
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "max_connections=200"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U banking_user -d banking_core" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # MinIO (S3-compatible storage)
   minio:
@@ -103,9 +222,11 @@ services:
       minio:
         condition: service_healthy
     entrypoint: >
-      /bin/sh -c " echo 'Waiting for MinIO to be ready...'; sleep 10; /usr/bin/mc alias set myminio http://minio:9000 admin admin123; /usr/bin/mc mb myminio/bronze --ignore-existing; /usr/bin/mc mb myminio/silver --ignore-existing; /usr/bin/mc mb myminio/gold --ignore-existing; /usr/bin/mc mb myminio/checkpoints --ignore-existing; echo 'Buckets created successfully'; exit 0; "
+      /bin/sh -c " echo 'Waiting for MinIO...'; sleep 10; /usr/bin/mc alias set myminio http://minio:9000 admin admin123; /usr/bin/mc mb myminio/bronze --ignore-existing; /usr/bin/mc mb myminio/silver --ignore-existing; /usr/bin/mc mb myminio/gold --ignore-existing; /usr/bin/mc mb myminio/checkpoints --ignore-existing; echo 'Buckets created successfully'; exit 0; "
     networks:
       - cdc-network
+
+  # ==================== Spark Cluster ====================
 
   # Spark Master
   spark-master:
@@ -121,14 +242,15 @@ services:
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
       - SPARK_SSL_ENABLED=no
       - SPARK_USER=spark
+      - SPARK_PUBLIC_DNS=localhost
     ports:
-      - "8081:8080"
-      - "7077:7077"
-      - "4040:4040"
+      - "8082:8080" # Spark UI (8081 used by Schema Registry)
+      - "7077:7077" # Spark master port
+      - "4040:4040" # Spark application UI
     networks:
       - cdc-network
     volumes:
-      - ../spark-streaming-jobs:/opt/spark-jobs
+      - ../streaming-jobs:/opt/streaming-jobs
       - ../data:/opt/data
       - spark-logs:/opt/spark/logs
     healthcheck:
@@ -156,10 +278,13 @@ services:
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
       - SPARK_SSL_ENABLED=no
       - SPARK_USER=spark
+      - SPARK_PUBLIC_DNS=localhost
+    ports:
+      - "8084:8081" # Spark Worker 1 UI
     networks:
       - cdc-network
     volumes:
-      - ../spark-streaming-jobs:/opt/spark-jobs
+      - ../streaming-jobs:/opt/streaming-jobs
       - ../data:/opt/data
 
   # Spark Worker 2
@@ -181,41 +306,14 @@ services:
       - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
       - SPARK_SSL_ENABLED=no
       - SPARK_USER=spark
-    networks:
-      - cdc-network
-    volumes:
-      - ../spark-streaming-jobs:/opt/spark-jobs
-      - ../data:/opt/data
-
-  # PostgreSQL (simulates source database)
-  postgres:
-    image: postgres:14
-    container_name: cdc-postgres
-    hostname: postgres
-    environment:
-      POSTGRES_DB: banking_core
-      POSTGRES_USER: banking_user
-      POSTGRES_PASSWORD: banking_pass
+      - SPARK_PUBLIC_DNS=localhost
     ports:
-      - "5433:5432" # Note: Using 5433 externally to avoid conflicts
+      - "8085:8081" # Spark Worker 2 UI
     networks:
       - cdc-network
     volumes:
-      - postgres-data:/var/lib/postgresql/data
-      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
-    command:
-      - "postgres"
-      - "-c"
-      - "wal_level=logical"
-      - "-c"
-      - "max_replication_slots=4"
-      - "-c"
-      - "max_wal_senders=4"
-    healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U banking_user -d banking_core" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - ../streaming-jobs:/opt/streaming-jobs
+      - ../data:/opt/data
 
 networks:
   cdc-network:
